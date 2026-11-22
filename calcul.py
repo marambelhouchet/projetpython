@@ -76,24 +76,50 @@ def merge_partial(target, partial):
             s["max"] = max(s["max"], p["max"])
 
 
+# ---------- rapport lisible ----------
+ICONES = {"temperature": "🌡️", "co2": "🌫️", "pm25": "😷", "noise": "🔊",
+          "traffic": "🚗", "water_level": "💧"}
+NOMS = {"temperature": "Température", "co2": "CO₂", "pm25": "Particules PM2.5",
+        "noise": "Bruit", "traffic": "Trafic", "water_level": "Niveau d'eau"}
+
+
+def _pluriel(n, mot):
+    return f"{n} {mot}{'s' if n > 1 else ''}"
+
+
 def format_report(daily, alerts, start, end, mode):
-    fmt = "%Y-%m-%d %H:%M:%S"
-    out = ["=" * 66,
-           "RAPPORT SMARTCITY-STREAM",
-           f"Période : {time.strftime(fmt, time.localtime(start))}  ->  {time.strftime(fmt, time.localtime(end))}",
-           f"Mode d'analyse : {mode}",
-           "=" * 66]
-    if not daily:
-        out.append("Aucune mesure reçue sur la période.")
+    """Rapport lisible. daily = {type: {count, sum, min, max}}, alerts = liste d'AlerteUrbaine."""
+    hm = lambda ts: time.strftime("%Hh%M", time.localtime(ts))
+    jour = time.strftime("%d/%m/%Y", time.localtime(start))
+    minutes = max(1, round((end - start) / 60))
+    out = ["📊 Rapport SmartCity-Stream",
+           f"🕐 {jour}, de {hm(start)} à {hm(end)} ({minutes} min) · analyse en mode {mode}", ""]
+
+    total = sum(s["count"] for s in daily.values())
+    if total == 0:
+        out.append("😴 Rien à signaler : aucune mesure reçue sur cette période.")
+        out.append("   Vérifie que les capteurs (sensor_simulator.py) sont bien lancés.")
+        return "\n".join(out)
+
+    crit = [a for a in alerts if a.niveau == "CRITIQUE"]
+    if not alerts:
+        out.append(f"✅ Tout est calme : {_pluriel(total, 'mesure')} reçue{'s' if total > 1 else ''}, aucune alerte.")
+    else:
+        out.append(f"⚠️ {_pluriel(total, 'mesure')} reçue{'s' if total > 1 else ''}, "
+                   f"{_pluriel(len(alerts), 'alerte')} dont {_pluriel(len(crit), 'critique')}.")
+    out.append("")
+
     for t, s in sorted(daily.items()):
-        out.append(f"{t:12} n={s['count']:7}  moy={s['sum'] / s['count']:9.2f}  "
-                   f"min={s['min']:9.2f}  max={s['max']:9.2f}")
-    crit = sum(1 for a in alerts if a.niveau == "CRITIQUE")
-    out.append("-" * 66)
-    out.append(f"Alertes : {len(alerts)} (dont CRITIQUE : {crit})")
-    for t, n in Counter(a.type for a in alerts).most_common():
-        out.append(f"  - {t:12} {n}")
-    top = Counter(a.sensor_id for a in alerts).most_common(5)
-    if top:
-        out.append("Capteurs les plus en alerte : " + ", ".join(f"{s} ({n})" for s, n in top))
+        out.append(f"{ICONES.get(t, '•')} {NOMS.get(t, t):<17} {s['count']:>6} mesures · "
+                   f"moyenne {s['sum'] / s['count']:.1f} · de {s['min']:.1f} à {s['max']:.1f}")
+
+    if alerts:
+        out += ["", "🔴 Détail des alertes :"]
+        for t, n in Counter(a.type for a in alerts).most_common():
+            groupe = [a for a in alerts if a.type == t]
+            pic = max(a.valeur for a in groupe)
+            out.append(f"   • {NOMS.get(t, t)} : {_pluriel(n, 'alerte')} "
+                       f"(pic {pic:.1f}, seuil {groupe[0].seuil})")
+        top = Counter(a.sensor_id for a in alerts).most_common(3)
+        out.append("   Capteurs les plus en alerte : " + ", ".join(f"{s} ({n})" for s, n in top))
     return "\n".join(out)

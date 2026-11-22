@@ -7,7 +7,7 @@ UDP (capteurs) -> file -> lots -> Pool (threads OU processus) -> stats + alertes
 Usage :
     python server.py --mode threads               # analyse avec des threads
     python server.py --mode processes             # analyse avec des processus
-Options : --workers N  --work N  --report-interval S
+Options : --workers N  --work N  --report-interval S  --keep-empty
 """
 import argparse
 import os
@@ -28,8 +28,10 @@ from net_utils import recv_msg, safe_loads, send_msg
 
 
 class Hub:
-    def __init__(self, mode, workers, work, report_interval, use_llm=True, llm_interval=None):
+    def __init__(self, mode, workers, work, report_interval, use_llm=True, llm_interval=None,
+                 keep_empty=False):                                    # NOUVEAU : keep_empty
         self.mode, self.workers, self.report_interval = mode, workers, report_interval
+        self.keep_empty = keep_empty                                   # NOUVEAU
         self.llm_on = use_llm and analysis.available()      # actif seulement si GEMINI_API_KEY est définie
         self.llm_interval = llm_interval or config.LLM_ALERT_INTERVAL
         self.llmq = queue.Queue(maxsize=3)             # jobs pour le thread LLM (contre-pression)
@@ -160,6 +162,10 @@ class Hub:
             daily, alerts = self.daily, self.daily_alerts
             start, end = self.report_start, time.time()
             self.daily, self.daily_alerts, self.report_start = {}, [], end
+        # NOUVEAU : pas de fichier inutile quand aucune mesure n'est arrivée
+        if not daily and not self.keep_empty:
+            self.log("rapport ignoré : aucune mesure reçue sur la période (capteurs lancés ?)")
+            return
         text = calcul.format_report(daily, alerts, start, end, self.mode)
         os.makedirs(config.REPORT_DIR, exist_ok=True)
         path = os.path.join(config.REPORT_DIR, time.strftime("report_%Y%m%d_%H%M%S.txt"))
@@ -169,7 +175,7 @@ class Hub:
             self.last_report = text
         self.log(f"rapport généré: {path}")
         self.notifyq.put(("report", text))
-        if self.llm_on:
+        if self.llm_on and alerts:          # NOUVEAU : Gemini seulement s'il y a des alertes (quota gratuit)
             self.submit_llm(("report", text))
 
     # ---------- LLM : appels réseau lents => thread dédié (I/O-bound : un thread suffit, même en
@@ -350,9 +356,11 @@ def main():
     ap.add_argument("--no-llm", action="store_true", help="désactive l'analyse par LLM")
     ap.add_argument("--llm-interval", type=float, default=None,
                     help="secondes entre deux diagnostics d'alertes (défaut: config.LLM_ALERT_INTERVAL)")
+    ap.add_argument("--keep-empty", action="store_true",     # NOUVEAU
+                    help="écrit aussi les rapports vides (aucune mesure reçue)")
     a = ap.parse_args()
     Hub(a.mode, a.workers, a.work, a.report_interval,
-        use_llm=not a.no_llm, llm_interval=a.llm_interval).run()
+        use_llm=not a.no_llm, llm_interval=a.llm_interval, keep_empty=a.keep_empty).run()
 
 
 if __name__ == "__main__":
