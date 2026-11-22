@@ -12,6 +12,15 @@ REPORT_INTERVAL = 60       # secondes entre deux rapports ("1 jour" simulé)
 REPORT_DIR = "reports"
 LOG_FILE = "server.log"
 
+# --- Analyse par LLM (Gemini). Clé : ci-dessous, ou à défaut la variable d'environnement GEMINI_API_KEY ---
+GEMINI_API_KEY = "AIzaSyD2kPjg90pyOXOL0_rbL39wwDpSOyrwZK0"                     
+GEMINI_MODEL = "gemini-3.5-flash-lite"   # surchargeable : set GEMINI_MODEL=...  (voir: python analysis.py)
+LLM_TIMEOUT = 30            # secondes max par appel
+LLM_MAX_TOKENS = 2048
+LLM_MIN_INTERVAL = 6.0      # secondes min entre 2 appels (quota du palier gratuit ~10/min)
+LLM_ALERT_INTERVAL = 30.0   # toutes les 30 s, les alertes accumulées sont envoyées au LLM en UN seul diagnostic
+LLM_MIN_ALERTS = 5          # pas de diagnostic en dessous de ce nombre d'alertes
+
 # Seuil d'alerte par type de capteur (éléments de la smart city)
 THRESHOLDS = {
     "temperature": 40.0,   # °C
