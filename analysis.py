@@ -3,9 +3,8 @@
 Le calcul rapide (statistiques, seuils) est dans calcul.py. Ici, le LLM reçoit des SYNTHÈSES
 (pas chaque mesure : 600 mesures/s serait trop lent et trop cher) et les interprète.
 
-Où mettre la clé (jamais dans ce code, jamais sur Git) :
-  - option 1 : fichier  gemini_key.txt  à côté de ce fichier, contenant UNIQUEMENT la clé
-  - option 2 : variable d'environnement GEMINI_API_KEY   (set GEMINI_API_KEY=... sous cmd)
+Où mettre la clé : dans config.py (GEMINI_API_KEY = "..."), ou à défaut dans la variable
+d'environnement GEMINI_API_KEY.
 Test de la clé et liste des modèles :   python analysis.py
 """
 import json
@@ -30,16 +29,8 @@ class LLMError(Exception):
 
 
 def cle():
-    """Clé API : variable d'environnement, sinon fichier gemini_key.txt (à côté de ce fichier)."""
-    valeur = os.environ.get("GEMINI_API_KEY", "").strip()
-    if not valeur:
-        chemin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gemini_key.txt")
-        try:
-            with open(chemin, encoding="utf-8") as f:
-                valeur = f.read().strip()
-        except OSError:
-            pass
-    return valeur
+    """Clé API : celle de config.py, sinon la variable d'environnement GEMINI_API_KEY."""
+    return config.GEMINI_API_KEY.strip() or os.environ.get("GEMINI_API_KEY", "").strip()
 
 
 def available():
@@ -68,7 +59,7 @@ def _attendre():
 
 def _appel(url, corps=None):
     if not available():
-        raise LLMError("clé absente : créez le fichier gemini_key.txt ou définissez GEMINI_API_KEY")
+        raise LLMError("clé absente : renseignez GEMINI_API_KEY dans config.py")
     requete = urllib.request.Request(
         url, data=json.dumps(corps).encode() if corps else None,
         headers={"Content-Type": "application/json", "x-goog-api-key": cle()})
@@ -129,8 +120,7 @@ def ask(question, stats, alertes):
 
 if __name__ == "__main__":
     if not available():
-        sys.exit("Aucune clé : créez le fichier gemini_key.txt (contenant seulement la clé) "
-                 "à côté de analysis.py, ou : set GEMINI_API_KEY=votre_cle")
+        sys.exit('Aucune clé : renseignez GEMINI_API_KEY = "votre_cle" dans config.py')
     try:
         base = os.environ.get("GEMINI_BASE_URL", URL)
         noms = [m["name"][7:] for m in _appel(f"{base}/models?pageSize=200").get("models", [])
