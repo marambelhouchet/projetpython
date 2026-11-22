@@ -1,6 +1,7 @@
-"""Fonctions d'analyse. Elles sont au premier niveau du module pour être picklables
-(obligatoire pour les envoyer à des processus)."""
+"""Calcul rapide (sans LLM) : statistiques, détection des seuils, rapports.
+Fonctions au premier niveau du module pour être picklables (obligatoire pour les envoyer à des processus)."""
 import math
+import re
 import time
 from collections import Counter
 
@@ -19,6 +20,20 @@ def heavy_compute(x, work):
 
 def niveau_alerte(valeur, seuil):
     return "CRITIQUE" if valeur > seuil * config.CRITICAL_RATIO else "ATTENTION"
+
+
+_SENSOR_ID = re.compile(r"[A-Za-z0-9_-]{1,16}")
+
+
+def valid_report(r):
+    """Rejette les paquets UDP mal formés ou hostiles. Indispensable : les identifiants de capteurs
+    finissent dans les rapports et dans les prompts du LLM, ils ne doivent contenir aucun texte libre."""
+    return (isinstance(r, models.RapportCapteur)
+            and isinstance(r.type, str) and r.type in config.THRESHOLDS
+            and isinstance(r.sensor_id, str) and _SENSOR_ID.fullmatch(r.sensor_id) is not None
+            and isinstance(r.valeur, (int, float)) and not isinstance(r.valeur, bool)
+            and math.isfinite(r.valeur)
+            and isinstance(r.timestamp, (int, float)) and not isinstance(r.timestamp, bool))
 
 
 def analyze_chunk(chunk, work=0):

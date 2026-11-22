@@ -2,3 +2,4 @@ server.log
 reports/
 __pycache__/
 benchmark_results.csv
+.env

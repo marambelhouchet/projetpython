@@ -1,3 +1,8 @@
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 HOST = "127.0.0.1"
 UDP_PORT = 9999            # capteurs -> serveur (UDP)
 TCP_PORT = 8888            # opérateurs <-> serveur (TCP)
@@ -13,7 +18,7 @@ REPORT_DIR = "reports"
 LOG_FILE = "server.log"
 
 # --- Analyse par LLM (Gemini). Clé : ci-dessous, ou à défaut la variable d'environnement GEMINI_API_KEY ---
-GEMINI_API_KEY = "AIzaSyD2kPjg90pyOXOL0_rbL39wwDpSOyrwZK0"                     
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")                  
 GEMINI_MODEL = "gemini-3.5-flash-lite"   # surchargeable : set GEMINI_MODEL=...  (voir: python analysis.py)
 LLM_TIMEOUT = 30            # secondes max par appel
 LLM_MAX_TOKENS = 2048
