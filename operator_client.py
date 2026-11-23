@@ -1,6 +1,7 @@
-"""Console opérateur (TCP). S'abonne automatiquement : les ALERTES et RAPPORTS arrivent en direct.
-Commandes : stats | alerts [n] | last [n] | report | metrics | ping | quit
+"""Console opérateur (TCP). S'abonne automatiquement : les ALERTES, RAPPORTS et ANALYSES arrivent en direct.
+Commandes : stats | alerts [n] | last [n] | report | analysis | metrics | ping | quit
 (Ne pas nommer ce fichier operator.py : il masquerait le module standard 'operator'.)"""
+
 import socket
 import threading
 
@@ -15,13 +16,18 @@ def show(rep):
         print(f"\n>>> ATTENTION ALERTE : {d}")
     elif rep.kind == "report":
         print(f"\n>>> RAPPORT PÉRIODIQUE\n{d}")
+    elif rep.kind == "analysis":
+        print(f"\n>>> ANALYSE IA\n{d}")
     elif not rep.ok:
         print(f"\nErreur : {d}")
     elif isinstance(d, dict):
         print()
         for k, v in d.items():
             if isinstance(v, dict):
-                print(f"  {k:12} n={v['count']:6} moy={v['avg']:9.2f} min={v['min']:9.2f} max={v['max']:9.2f}")
+                print(
+                    f"  {k:12} n={v['count']:6} moy={v['avg']:9.2f} "
+                    f"min={v['min']:9.2f} max={v['max']:9.2f}"
+                )
             else:
                 print(f"  {k:16} {v}")
     elif isinstance(d, list):
@@ -52,7 +58,7 @@ def main():
     stop = threading.Event()
     threading.Thread(target=receiver, args=(sock, stop), daemon=True).start()
     send_msg(sock, Requete("SUBSCRIBE"))
-    print("Commandes : stats | alerts [n] | last [n] | report | metrics | ping | quit")
+    print("Commandes : stats | alerts [n] | last [n] | report | analysis | metrics | ping | quit")
     try:
         while not stop.is_set():
             parts = input("> ").strip().split()
