@@ -81,7 +81,7 @@ def generate(prompt, consigne=CONSIGNE):
         raise LLMError("réponse vide ou bloquée") from None
 
 
-# ---------- les 3 analyses ----------
+# ---------- les 2 analyses ----------
 def _heure(ts):
     return time.strftime("%H:%M:%S", time.localtime(ts))
 
@@ -104,14 +104,6 @@ def summarize_report(texte):
     """Résumé en langage naturel du rapport périodique."""
     return generate(texte + "\n\nRésume ce rapport en 5 lignes maximum, sur un ton naturel et humain : "
                     "tendances, risques, conseil. Pas de titres, pas de markdown, pas de listes à puces.")
-
-
-def ask(question, stats, alertes):
-    """Réponse à une question libre de l'opérateur, avec l'état actuel du système."""
-    contexte = [f"- {t} : {s['count']} mesures, moyenne {s['avg']:.1f}, min {s['min']:.1f}, max {s['max']:.1f}"
-                for t, s in sorted(stats.items())]
-    contexte += [f"- alerte {a.niveau} {a.type} {a.sensor_id} = {a.valeur:.1f}" for a in alertes]
-    return generate("\n".join(contexte) + f"\nQuestion : {question}")
 
 
 if __name__ == "__main__":
