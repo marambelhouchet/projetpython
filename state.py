@@ -2,7 +2,6 @@ import threading
 import time
 
 import analysis
-import calcul
 import config
 
 
@@ -13,9 +12,11 @@ class State:
         self.report_interval = report_interval
         self.llm_on = llm_on
 
+        # Deux verrous : un pour les données, un pour le fichier de logs
         self.lock = threading.Lock()
         self.log_lock = threading.Lock()
 
+        # Données partagées
         self.total = {}
         self.daily = {}
         self.alerts = []
@@ -28,6 +29,7 @@ class State:
         self.report_start = time.time()
         self.t0 = time.time()
 
+        # Compteurs (métriques)
         self.m = {
             "received": 0,
             "processed": 0,
@@ -37,47 +39,96 @@ class State:
         }
 
     def log(self, msg):
-        line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+        heure = time.strftime("%Y-%m-%d %H:%M:%S")
+        line = heure + " " + msg
         print(line, flush=True)
-        with self.log_lock, open(config.LOG_FILE, "a", encoding="utf-8") as f:
+
+        # Un seul thread écrit dans le fichier à la fois
+        self.log_lock.acquire()
+        try:
+            f = open(config.LOG_FILE, "a", encoding="utf-8")
             f.write(line + "\n")
+            f.close()
+        finally:
+            self.log_lock.release()
 
     def stats(self):
+        """Ajoute la moyenne à chaque type de capteur."""
+        resultat = {}
+        for type_capteur in self.total:
+            s = self.total[type_capteur]
+            resultat[type_capteur] = {
+                "count": s["count"],
+                "sum": s["sum"],
+                "min": s["min"],
+                "max": s["max"],
+                "avg": s["sum"] / s["count"],
+            }
+        return resultat
+
+    def metrics(self):
+        m = self.m
+        uptime = time.time() - self.t0
+
+        debit = 0.0
+        if uptime > 0:
+            debit = m["processed"] / uptime
+
+        traites = m["processed"]
+        if traites == 0:
+            traites = 1          # évite la division par zéro
+        ms_par_mesure = 1000 * m["analysis_s"] / traites
+
+        if self.llm_on:
+            llm = analysis.model()
+        else:
+            llm = "désactivé"
+
         return {
-            t: {**s, "avg": s["sum"] / s["count"]}
-            for t, s in self.total.items()
+            "mode": self.mode,
+            "workers": self.workers,
+            "llm": llm,
+            "recus": m["received"],
+            "traites": m["processed"],
+            "alertes": m["alerts"],
+            "uptime_s": round(uptime, 1),
+            "debit_traite/s": round(debit, 1),
+            "temps_analyse_s": round(m["analysis_s"], 2),
+            "ms_par_mesure": round(ms_par_mesure, 3),
         }
 
     def answer(self, cmd, arg):
-        n = arg if isinstance(arg, int) and arg > 0 else 10
+        """Répond à une commande de l'opérateur. Renvoie (ok, données)."""
+        # n = nombre d'éléments demandés (10 par défaut)
+        n = 10
+        if isinstance(arg, int) and arg > 0:
+            n = arg
+
+        # Le verrou protège toutes les données lues ci-dessous
         with self.lock:
             if cmd == "PING":
                 return True, "pong"
+
             if cmd == "STATS":
                 return True, self.stats()
+
             if cmd == "ALERTS":
                 return True, self.alerts[-n:]
+
             if cmd == "LAST":
                 return True, self.last[-n:]
-            if cmd == "REPORT": 
-                return True, self.last_report or "aucun rapport pour l'instant"
+
+            if cmd == "REPORT":
+                if self.last_report is None:
+                    return True, "aucun rapport pour l'instant"
+                return True, self.last_report
+
             if cmd == "ANALYSIS":
-                return True, self.last_analysis or "aucune analyse IA pour l'instant"
+                if self.last_analysis is None:
+                    return True, "aucune analyse IA pour l'instant"
+                return True, self.last_analysis
+
             if cmd == "METRICS":
-                up = time.time() - self.t0
-                m = self.m
-                return True, {
-                    "mode": self.mode,
-                    "workers": self.workers,
-                    "llm": analysis.model() if self.llm_on else "désactivé",
-                    "recus": m["received"],
-                    "traites": m["processed"],
-                    "alertes": m["alerts"],
-                    "uptime_s": round(up, 1),
-                    "debit_traite/s": round(m["processed"] / up, 1) if up > 0 else 0.0,
-                    "temps_analyse_s": round(m["analysis_s"], 2),
-                    "ms_par_mesure": round(
-                        1000 * m["analysis_s"] / max(m["processed"], 1), 3
-                    ),
-                }
-        return False, f"commande inconnue: {cmd}"
+                return True, self.metrics()
+
+        return False, "commande inconnue: " + cmd

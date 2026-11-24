@@ -1,14 +1,15 @@
+import pickle
 import queue
 import socket
 import threading
 
-import calcul
 import config
 import models
-from net_utils import recv_msg, safe_loads, send_msg
+from net_utils import recv_msg, send_msg
 
 
 def udp_loop(state, inq, stop):
+    """Reçoit les mesures des capteurs et les met dans la file inq."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
     sock.bind((config.HOST, config.UDP_PORT))
@@ -18,35 +19,37 @@ def udp_loop(state, inq, stop):
     while not stop.is_set():
         try:
             data, _ = sock.recvfrom(4096)
-            r = safe_loads(data)
-            if not calcul.valid_report(r):
-                raise ValueError("mesure invalide")
         except socket.timeout:
             continue
+
+        try:
+            mesure = pickle.loads(data)
         except Exception as e:
-            state.log(f"paquet UDP rejeté: {e}")
+            state.log(f"paquet UDP illisible: {e}")
             continue
 
-        inq.put(r)
+        inq.put(mesure)
         with state.lock:
             state.m["received"] += 1
-            state.last.append(r)
+            state.last.append(mesure)
             del state.last[:-100]
 
     sock.close()
 
 
 def notifier_loop(notifyq, subs, subs_lock, stop):
+    """Envoie alertes, rapports et analyses à tous les opérateurs abonnés."""
     while not stop.is_set():
         try:
             kind, data = notifyq.get(timeout=0.5)
         except queue.Empty:
             continue
 
+        # On copie la liste des abonnés vite, puis on envoie hors du verrou
         with subs_lock:
-            targets = list(subs.items())
+            cibles = list(subs.items())
 
-        for conn, lock in targets:
+        for conn, lock in cibles:
             try:
                 with lock:
                     send_msg(conn, models.Reponse(True, data, kind))
@@ -56,7 +59,8 @@ def notifier_loop(notifyq, subs, subs_lock, stop):
 
 
 def handle_operator(conn, addr, state, subs, subs_lock, sem, stop):
-    lock = threading.Lock()
+    """Un thread par opérateur : lit ses commandes et répond."""
+    lock = threading.Lock()          # un seul envoi à la fois sur cette connexion
     state.log(f"opérateur connecté {addr}")
     try:
         while not stop.is_set():
@@ -90,21 +94,19 @@ def handle_operator(conn, addr, state, subs, subs_lock, sem, stop):
         with subs_lock:
             subs.pop(conn, None)
         conn.close()
-        sem.release()
+        sem.release()                # on rend la place
         state.log(f"opérateur déconnecté {addr}")
 
 
 def tcp_loop(state, subs, subs_lock, stop):
+    """Accepte les opérateurs (maximum MAX_OPERATORS grâce au sémaphore)."""
     sem = threading.Semaphore(config.MAX_OPERATORS)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((config.HOST, config.TCP_PORT))
     srv.listen()
     srv.settimeout(1.0)
-    state.log(
-        f"TCP en écoute sur {config.HOST}:{config.TCP_PORT} "
-        f"(max {config.MAX_OPERATORS} opérateurs)"
-    )
+    state.log(f"TCP en écoute sur {config.HOST}:{config.TCP_PORT} (max {config.MAX_OPERATORS} opérateurs)")
 
     while not stop.is_set():
         try:
@@ -112,7 +114,7 @@ def tcp_loop(state, subs, subs_lock, stop):
         except socket.timeout:
             continue
 
-        if not sem.acquire(blocking=False):
+        if not sem.acquire(blocking=False):      # plus de place
             try:
                 send_msg(conn, models.Reponse(False, "SERVER_FULL"))
             finally:
@@ -120,10 +122,8 @@ def tcp_loop(state, subs, subs_lock, stop):
             state.log(f"{addr} refusé (serveur plein)")
             continue
 
-        threading.Thread(
-            target=handle_operator,
-            args=(conn, addr, state, subs, subs_lock, sem, stop),
-            daemon=True,
-        ).start()
+        threading.Thread(target=handle_operator,
+                         args=(conn, addr, state, subs, subs_lock, sem, stop),
+                         daemon=True).start()
 
     srv.close()

@@ -1,7 +1,6 @@
 """Calcul rapide (sans LLM) : statistiques, détection des seuils, rapports.
-Fonctions au premier niveau du module pour être picklables (obligatoire pour les envoyer à des processus)."""
+Fonctions au premier niveau du module pour être picklables (envoi aux processus)."""
 import math
-import re
 import time
 from collections import Counter
 
@@ -10,8 +9,7 @@ import models
 
 
 def heavy_compute(x, work):
-    """Simule un calcul coûteux par mesure (score d'anomalie, FFT, modèle ML...).
-    Pur CPU : c'est ce type de charge que le GIL empêche de paralléliser avec des threads."""
+    """Simule un calcul coûteux par mesure (score d'anomalie, FFT, modèle ML...)."""
     acc = float(x)
     for i in range(work):
         acc = math.sin(acc) * math.cos(acc + i) + math.sqrt(abs(acc) + 1.0)
@@ -19,21 +17,9 @@ def heavy_compute(x, work):
 
 
 def niveau_alerte(valeur, seuil):
-    return "CRITIQUE" if valeur > seuil * config.CRITICAL_RATIO else "ATTENTION"
-
-
-_SENSOR_ID = re.compile(r"[A-Za-z0-9_-]{1,16}")
-
-
-def valid_report(r):
-    """Rejette les paquets UDP mal formés ou hostiles. Indispensable : les identifiants de capteurs
-    finissent dans les rapports et dans les prompts du LLM, ils ne doivent contenir aucun texte libre."""
-    return (isinstance(r, models.RapportCapteur)
-            and isinstance(r.type, str) and r.type in config.THRESHOLDS
-            and isinstance(r.sensor_id, str) and _SENSOR_ID.fullmatch(r.sensor_id) is not None
-            and isinstance(r.valeur, (int, float)) and not isinstance(r.valeur, bool)
-            and math.isfinite(r.valeur)
-            and isinstance(r.timestamp, (int, float)) and not isinstance(r.timestamp, bool))
+    if valeur > seuil * config.CRITICAL_RATIO:
+        return "CRITIQUE"
+    return "ATTENTION"
 
 
 def analyze_chunk(chunk, work=0):

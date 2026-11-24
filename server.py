@@ -3,7 +3,6 @@
 import argparse
 import os
 import queue
-import signal
 import threading
 import time
 from functools import partial
@@ -17,59 +16,90 @@ from network import notifier_loop, tcp_loop, udp_loop
 from state import State
 
 
-def ignore_sigint():
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
+# ---------- 1. Calcul par lots ----------
+def lire_un_lot(inq, stop):
+    """Prend des mesures dans la file jusqu'à BATCH_SIZE ou jusqu'au délai BATCH_TIMEOUT."""
+    batch = []
+    limite = time.time() + config.BATCH_TIMEOUT
+
+    while len(batch) < config.BATCH_SIZE and not stop.is_set():
+        reste = limite - time.time()
+        if reste <= 0:
+            break
+        try:
+            batch.append(inq.get(timeout=min(0.2, reste)))
+        except queue.Empty:
+            pass
+    return batch
+
+
+def decouper(batch, nb_workers):
+    """Répartit le lot en morceaux, un par worker."""
+    chunks = []
+    for i in range(nb_workers):
+        morceau = batch[i::nb_workers]
+        if morceau:
+            chunks.append(morceau)
+    return chunks
+
+
+def fusionner(state, results, nb_mesures, duree):
+    """Additionne les résultats des workers dans l'état partagé. Renvoie les nouvelles alertes."""
+    new_alerts = []
+
+    with state.lock:
+        for stats_partielles, alertes_trouvees in results:
+            calcul.merge_partial(state.total, stats_partielles)
+            calcul.merge_partial(state.daily, stats_partielles)
+            new_alerts.extend(alertes_trouvees)
+
+        state.alerts.extend(new_alerts)
+        del state.alerts[:-200]
+        state.daily_alerts.extend(new_alerts)
+
+        if state.llm_on:
+            state.llm_pending.extend(new_alerts)
+            del state.llm_pending[:-500]
+
+        state.m["processed"] += nb_mesures
+        state.m["alerts"] += len(new_alerts)
+        state.m["analysis_s"] += duree
+        state.m["batches"] += 1
+
+    return new_alerts
 
 
 def batch_loop(state, inq, notifyq, pool, fn, stop):
     while not stop.is_set():
-        batch = []
-        deadline = time.time() + config.BATCH_TIMEOUT
-
-        while len(batch) < config.BATCH_SIZE and not stop.is_set():
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            try:
-                batch.append(inq.get(timeout=min(0.2, remaining)))
-            except queue.Empty:
-                pass
-
+        batch = lire_un_lot(inq, stop)
         if not batch:
             continue
 
-        n = state.workers
-        chunks = [batch[i::n] for i in range(n) if batch[i::n]]
-        t = time.perf_counter()
-        results = pool.map(fn, chunks)
-        elapsed = time.perf_counter() - t
+        chunks = decouper(batch, state.workers)
 
-        new_alerts = []
-        with state.lock:
-            for partial_stats, found in results:
-                calcul.merge_partial(state.total, partial_stats)
-                calcul.merge_partial(state.daily, partial_stats)
-                new_alerts.extend(found)
+        debut = time.perf_counter()
+        results = pool.map(fn, chunks)          # chaque worker calcule un morceau
+        duree = time.perf_counter() - debut
 
-            state.alerts.extend(new_alerts)
-            del state.alerts[:-200]
-            state.daily_alerts.extend(new_alerts)
+        new_alerts = fusionner(state, results, len(batch), duree)
 
-            if state.llm_on:
-                state.llm_pending.extend(new_alerts)
-                del state.llm_pending[:-500]
+        for alerte in new_alerts:
+            state.log(str(alerte))
+            notifyq.put(("alert", alerte))
 
-            state.m["processed"] += len(batch)
-            state.m["alerts"] += len(new_alerts)
-            state.m["analysis_s"] += elapsed
-            state.m["batches"] += 1
 
-        for a in new_alerts:
-            state.log(str(a))
-            notifyq.put(("alert", a))
+# ---------- 2. Rapport périodique ----------
+def ecrire_fichier_rapport(texte):
+    os.makedirs(config.REPORT_DIR, exist_ok=True)
+    nom = time.strftime("report_%Y%m%d_%H%M%S.txt")
+    chemin = os.path.join(config.REPORT_DIR, nom)
+    with open(chemin, "w", encoding="utf-8") as f:
+        f.write(texte + "\n")
+    return chemin
 
 
 def make_report(state, notifyq, llmq, keep_empty):
+    # On prend les données de la période et on remet des listes vides
     with state.lock:
         daily = state.daily
         alerts = state.daily_alerts
@@ -80,29 +110,21 @@ def make_report(state, notifyq, llmq, keep_empty):
         state.report_start = end
 
     if not daily and not keep_empty:
-        state.log(
-            "rapport ignoré : aucune mesure reçue sur la période "
-            "(capteurs lancés ?)"
-        )
+        state.log("rapport ignoré : aucune mesure reçue sur la période (capteurs lancés ?)")
         return
 
-    text = calcul.format_report(daily, alerts, start, end, state.mode)
-    os.makedirs(config.REPORT_DIR, exist_ok=True)
-    path = os.path.join(
-        config.REPORT_DIR,
-        time.strftime("report_%Y%m%d_%H%M%S.txt"),
-    )
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text + "\n")
+    texte = calcul.format_report(daily, alerts, start, end, state.mode)
+    chemin = ecrire_fichier_rapport(texte)
 
     with state.lock:
-        state.last_report = text
-    state.log(f"rapport généré: {path}")
-    notifyq.put(("report", text))
+        state.last_report = texte
+    state.log(f"rapport généré: {chemin}")
+    notifyq.put(("report", texte))
 
+    # Gemini seulement s'il y a des alertes
     if state.llm_on and alerts:
         try:
-            llmq.put_nowait(("report", text))
+            llmq.put_nowait(("report", texte))
         except queue.Full:
             state.log("file LLM pleine : analyse ignorée")
 
@@ -112,44 +134,51 @@ def report_loop(state, notifyq, llmq, interval, keep_empty, stop):
         make_report(state, notifyq, llmq, keep_empty)
 
 
+# ---------- 3. Analyse par le LLM ----------
 def llm_loop(state, llmq, notifyq, interval, stop):
-    next_digest = time.time() + interval
+    prochain_diagnostic = time.time() + interval
+
     while not stop.is_set():
+        # 1) Y a-t-il un travail dans la file ?
+        job = None
         try:
             job = llmq.get(timeout=0.5)
         except queue.Empty:
-            job = None
+            pass
 
-        if job is None and time.time() >= next_digest:
-            next_digest = time.time() + interval
+        # 2) Sinon, est-ce l'heure du diagnostic des alertes accumulées ?
+        if job is None and time.time() >= prochain_diagnostic:
+            prochain_diagnostic = time.time() + interval
             with state.lock:
                 if len(state.llm_pending) >= config.LLM_MIN_ALERTS:
                     job = ("alerts", state.llm_pending)
                     state.llm_pending = []
 
-        if not job:
+        if job is None:
             continue
 
-        kind, payload = job
+        # 3) Appel à Gemini
+        kind, contenu = job
         try:
             if kind == "alerts":
-                title = f"Diagnostic de {len(payload)} alertes"
-                text = analysis.diagnose_alerts(payload)
+                titre = f"Diagnostic de {len(contenu)} alertes"
+                texte = analysis.diagnose_alerts(contenu)
             else:
-                title = "Résumé du rapport"
-                text = analysis.summarize_report(payload)
+                titre = "Résumé du rapport"
+                texte = analysis.summarize_report(contenu)
         except analysis.LLMError as e:
             state.log(f"LLM indisponible : {e}")
             continue
 
-        msg = f"[{time.strftime('%H:%M:%S')}] {title}\n{text}"
+        message = f"[{time.strftime('%H:%M:%S')}] {titre}\n{texte}"
         with state.lock:
-            state.last_analysis = msg
-        state.log(f"analyse IA générée : {title}")
-        notifyq.put(("analysis", msg))
+            state.last_analysis = message
+        state.log(f"analyse IA générée : {titre}")
+        notifyq.put(("analysis", message))
 
 
-def main():
+# ---------- 4. Démarrage ----------
+def lire_options():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["threads", "processes"], default="threads")
     ap.add_argument("--workers", type=int, default=config.WORKERS or os.cpu_count())
@@ -166,23 +195,36 @@ def main():
         ap.error("--work doit être positif ou nul")
     if a.report_interval <= 0:
         ap.error("--report-interval doit être supérieur à 0")
+    return a
 
-    llm_on = (not a.no_llm) and analysis.available()
-    llm_interval = a.llm_interval or config.LLM_ALERT_INTERVAL
 
-    pool = (
-        ThreadPool(a.workers)
-        if a.mode == "threads"
-        else Pool(a.workers, initializer=ignore_sigint)
-    )
+def main():
+    a = lire_options()
 
+    # Le LLM est actif seulement si on ne l'a pas désactivé ET si la clé existe
+    llm_on = False
+    if not a.no_llm and analysis.available():
+        llm_on = True
+
+    llm_interval = config.LLM_ALERT_INTERVAL
+    if a.llm_interval:
+        llm_interval = a.llm_interval
+
+    # Le Pool : threads OU processus (même façon de l'utiliser : pool.map)
+    if a.mode == "threads":
+        pool = ThreadPool(a.workers)
+    else:
+        pool = Pool(a.workers)
+
+    # Objets partagés entre les threads
     stop = threading.Event()
-    inq = queue.Queue()
-    notifyq = queue.Queue()
-    llmq = queue.Queue(maxsize=3)
-    subs = {}
+    inq = queue.Queue()                  # mesures reçues
+    notifyq = queue.Queue()              # messages à envoyer aux opérateurs
+    llmq = queue.Queue(maxsize=3)        # travaux pour Gemini
+    subs = {}                            # opérateurs abonnés
     subs_lock = threading.Lock()
     state = State(a.mode, a.workers, a.report_interval, llm_on)
+
     fn = partial(calcul.analyze_chunk, work=a.work)
 
     threads = [
@@ -190,28 +232,22 @@ def main():
         threading.Thread(target=batch_loop, args=(state, inq, notifyq, pool, fn, stop)),
         threading.Thread(target=tcp_loop, args=(state, subs, subs_lock, stop)),
         threading.Thread(target=notifier_loop, args=(notifyq, subs, subs_lock, stop)),
-        threading.Thread(
-            target=report_loop,
-            args=(state, notifyq, llmq, a.report_interval, a.keep_empty, stop),
-        ),
+        threading.Thread(target=report_loop,
+                         args=(state, notifyq, llmq, a.report_interval, a.keep_empty, stop)),
     ]
     if llm_on:
-        threads.append(
-            threading.Thread(
-                target=llm_loop, args=(state, llmq, notifyq, llm_interval, stop)
-            )
-        )
+        threads.append(threading.Thread(target=llm_loop,
+                                        args=(state, llmq, notifyq, llm_interval, stop)))
 
     for t in threads:
         t.start()
 
-    llm_label = (
-        analysis.model() if llm_on else "désactivé (pas de GEMINI_API_KEY)"
-    )
-    state.log(
-        f"=== démarrage : mode={a.mode} workers={a.workers} "
-        f"rapport toutes les {a.report_interval}s LLM={llm_label} ==="
-    )
+    if llm_on:
+        llm_label = analysis.model()
+    else:
+        llm_label = "désactivé (pas de GEMINI_API_KEY)"
+    state.log(f"=== démarrage : mode={a.mode} workers={a.workers} "
+              f"rapport toutes les {a.report_interval}s LLM={llm_label} ===")
 
     try:
         while True:
@@ -219,10 +255,10 @@ def main():
     except KeyboardInterrupt:
         state.log("arrêt du serveur...")
     finally:
-        stop.set()
+        stop.set()                       # demande à tous les threads de s'arrêter
         for t in threads:
-            t.join()
-        make_report(state, notifyq, llmq, a.keep_empty)
+            t.join()                     # attend qu'ils aient fini
+        make_report(state, notifyq, llmq, a.keep_empty)    # dernier rapport
         pool.close()
         pool.join()
 
