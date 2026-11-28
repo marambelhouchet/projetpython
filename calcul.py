@@ -1,18 +1,14 @@
 """Calcul rapide (sans LLM) : statistiques, détection des seuils, rapports.
-Fonctions au premier niveau du module pour être picklables (envoi aux processus)."""
-import math
-import time
-from collections import Counter
-
+Fonctions au premier niveau du module pour être sérialisables (envoi aux processus)."""
 import config
 import models
 
 
 def heavy_compute(x, work):
-    """Simule un calcul coûteux par mesure (score d'anomalie, FFT, modèle ML...)."""
-    acc = float(x)
+    """Simule un calcul coûteux par mesure."""
+    acc = x
     for i in range(work):
-        acc = math.sin(acc) * math.cos(acc + i) + math.sqrt(abs(acc) + 1.0)
+        acc = (acc * acc + i) ** 0.5
     return acc
 
 
@@ -22,44 +18,52 @@ def niveau_alerte(valeur, seuil):
     return "ATTENTION"
 
 
-def analyze_chunk(chunk, work=0):
+def analyze_chunk(chunk, work):
     """Analyse un morceau de mesures -> (stats partielles par type, alertes détectées)."""
-    partial, found, sink = {}, [], 0.0
+    partial = {}
+    found = []
     for r in chunk:
-        if work:
-            sink += heavy_compute(r.valeur, work)
-        s = partial.get(r.type)
-        if s is None:
-            s = partial[r.type] = {"count": 0, "sum": 0.0, "min": r.valeur, "max": r.valeur}
+        heavy_compute(r.valeur, work)
+        if r.type not in partial:
+            partial[r.type] = {"count": 0, "sum": 0.0, "min": r.valeur, "max": r.valeur}
+        s = partial[r.type]
         s["count"] += 1
         s["sum"] += r.valeur
         s["min"] = min(s["min"], r.valeur)
         s["max"] = max(s["max"], r.valeur)
         seuil = config.THRESHOLDS.get(r.type)
         if seuil is not None and r.valeur > seuil:
-            found.append(models.AlerteUrbaine(
-                sensor_id=r.sensor_id, type=r.type, valeur=r.valeur, seuil=seuil,
-                niveau=niveau_alerte(r.valeur, seuil), timestamp=r.timestamp))
+            niveau = niveau_alerte(r.valeur, seuil)
+            found.append(models.AlerteUrbaine(r.sensor_id, r.type, r.valeur, seuil, niveau))
     return partial, found
 
 
-def io_chunk(chunk, delay=0.02):
-    """Tâche liée aux E/S (écriture en base, appel réseau...) : simulée par un sleep."""
-    time.sleep(delay)
-    return len(chunk)
+def analyze_tuple(data):
+    """Même analyse avec un seul argument (pour ThreadPoolExecutor.map)."""
+    chunk, work = data
+    return analyze_chunk(chunk, work)
 
 
 def merge_partial(target, partial):
     """Fusionne des stats partielles dans un dictionnaire cumulé."""
     for t, p in partial.items():
-        s = target.get(t)
-        if s is None:
+        if t not in target:
             target[t] = dict(p)
         else:
+            s = target[t]
             s["count"] += p["count"]
             s["sum"] += p["sum"]
             s["min"] = min(s["min"], p["min"])
             s["max"] = max(s["max"], p["max"])
+
+
+def les_plus_frequents(valeurs):
+    """Renvoie la liste des (valeur, nombre), de la plus fréquente à la moins fréquente."""
+    comptes = {}
+    for v in valeurs:
+        comptes[v] = comptes.get(v, 0) + 1
+    ordre = sorted(comptes, key=comptes.get, reverse=True)
+    return [(v, comptes[v]) for v in ordre]
 
 
 # ---------- rapport lisible ----------
@@ -73,15 +77,14 @@ def _pluriel(n, mot):
     return f"{n} {mot}{'s' if n > 1 else ''}"
 
 
-def format_report(daily, alerts, start, end, mode):
+def format_report(daily, alerts, duree, mode):
     """Rapport lisible. daily = {type: {count, sum, min, max}}, alerts = liste d'AlerteUrbaine."""
-    hm = lambda ts: time.strftime("%Hh%M", time.localtime(ts))
-    jour = time.strftime("%d/%m/%Y", time.localtime(start))
-    minutes = max(1, round((end - start) / 60))
     out = ["📊 Rapport SmartCity-Stream",
-           f"🕐 {jour}, de {hm(start)} à {hm(end)} ({minutes} min) · analyse en mode {mode}", ""]
+           f"🕐 Période de {duree:.0f} s · analyse en mode {mode}", ""]
 
-    total = sum(s["count"] for s in daily.values())
+    total = 0
+    for s in daily.values():
+        total += s["count"]
     if total == 0:
         out.append("😴 Rien à signaler : aucune mesure reçue sur cette période.")
         out.append("   Vérifie que les capteurs (sensor_simulator.py) sont bien lancés.")
@@ -101,11 +104,11 @@ def format_report(daily, alerts, start, end, mode):
 
     if alerts:
         out += ["", "🔴 Détail des alertes :"]
-        for t, n in Counter(a.type for a in alerts).most_common():
+        for t, n in les_plus_frequents([a.type for a in alerts]):
             groupe = [a for a in alerts if a.type == t]
             pic = max(a.valeur for a in groupe)
             out.append(f"   • {NOMS.get(t, t)} : {_pluriel(n, 'alerte')} "
                        f"(pic {pic:.1f}, seuil {groupe[0].seuil})")
-        top = Counter(a.sensor_id for a in alerts).most_common(3)
+        top = les_plus_frequents([a.sensor_id for a in alerts])[:3]
         out.append("   Capteurs les plus en alerte : " + ", ".join(f"{s} ({n})" for s, n in top))
     return "\n".join(out)
