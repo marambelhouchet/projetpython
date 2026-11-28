@@ -1,4 +1,8 @@
-"""Serveur SmartCity-Stream. Lancer : python server.py  (Entrée pour arrêter)."""
+"""Serveur SmartCity-Stream. Lancer : python server.py  (Entrée pour arrêter).
+Options (écrasent config.py pour cette exécution) :
+  --mode threads|processes   --workers N   --work N
+  --report-interval S        --no-llm      --llm-interval S"""
+import argparse
 import multiprocessing as mp
 import queue
 import threading
@@ -10,6 +14,32 @@ import calcul
 import config
 from network import notifier_loop, tcp_loop, udp_loop
 from state import State
+
+
+# ---------- 0. Options de la ligne de commande ----------
+def lire_options():
+    p = argparse.ArgumentParser(description="Serveur SmartCity-Stream")
+    p.add_argument("--mode", choices=["threads", "processes"],
+                   help="threads (ThreadPool) ou processes (Pool de processus)")
+    p.add_argument("--workers", type=int, help="nombre de workers (défaut : nombre de coeurs)")
+    p.add_argument("--work", type=int, help="charge de calcul simulée par mesure (0 = aucune)")
+    p.add_argument("--report-interval", type=int, help="secondes entre deux rapports")
+    p.add_argument("--no-llm", action="store_true", help="désactive Gemini")
+    p.add_argument("--llm-interval", type=int, help="secondes entre deux diagnostics d'alertes")
+    a = p.parse_args()
+
+    # Les options écrasent les valeurs de config.py (les autres modules lisent config.xxx)
+    if a.workers is not None:
+        config.WORKERS = a.workers
+    if a.work is not None:
+        config.WORK_FACTOR = a.work
+    if a.report_interval is not None:
+        config.REPORT_INTERVAL = a.report_interval
+    if a.no_llm:
+        config.LLM_ON = False
+    if a.llm_interval is not None:
+        config.LLM_ALERT_INTERVAL = a.llm_interval
+    return a
 
 
 # ---------- 1. Traitement par lots ----------
@@ -162,7 +192,10 @@ def llm_loop(state, notifyq):
 
 # ---------- 4. Démarrage ----------
 def main():
-    mode = input("Mode (threads / processes) [Entrée = " + config.MODE + "] : ").strip() or config.MODE
+    options = lire_options()
+
+    # --mode donné : pas de question. Sinon on demande, comme avant.
+    mode = options.mode or input("Mode (threads / processes) [Entrée = " + config.MODE + "] : ").strip() or config.MODE
     if mode not in ("threads", "processes"):
         print("Mode inconnu")
         return
@@ -197,7 +230,7 @@ def main():
             t.start()
 
         llm_label = config.GEMINI_MODEL if state.llm_on else "désactivé"
-        state.log(f"=== démarrage : mode={mode} workers={workers} "
+        state.log(f"=== démarrage : mode={mode} workers={workers} work={config.WORK_FACTOR} "
                   f"rapport toutes les {config.REPORT_INTERVAL}s LLM={llm_label} ===")
 
         input("Appuyez sur Entrée pour arrêter le serveur.\n")
